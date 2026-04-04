@@ -1,6 +1,8 @@
-# 🌈 Gesture Calculator MVP
-
 <div align="center">
+
+<img src="frontend/public/images/icon.webp" alt="Gesture Calculator icon" width="120" />
+
+# Gesture Calculator MVP
 
 ![Next.js](https://img.shields.io/badge/Next.js-15-111111?style=for-the-badge&logo=nextdotjs&logoColor=white)
 ![React](https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=0A0A0A)
