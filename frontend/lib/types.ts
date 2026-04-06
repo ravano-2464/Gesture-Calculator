@@ -6,6 +6,13 @@ export type StorageMode = "offline" | "memory" | "database";
 
 export type Handedness = "Left" | "Right" | "Unknown";
 
+export interface CameraOverlayBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
 export interface RecognizedGesture {
   label: string;
   token: string;

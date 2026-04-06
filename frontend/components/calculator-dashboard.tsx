@@ -19,6 +19,8 @@ export function CalculatorDashboard() {
     result,
     history,
     activeGesture,
+    detectionGuideBox,
+    handDetectionBox,
     isRecognizerReady,
     isCameraActive,
     isSavingHistory,
@@ -134,6 +136,8 @@ export function CalculatorDashboard() {
         <div className="grid gap-6 xl:grid-cols-[1.35fr,1fr]">
           <CameraPanel
             videoRef={videoRef}
+            detectionGuideBox={detectionGuideBox}
+            handDetectionBox={handDetectionBox}
             isCameraActive={isCameraActive}
             isRecognizerReady={isRecognizerReady}
             activeGesture={activeGesture}

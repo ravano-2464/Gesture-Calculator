@@ -18,6 +18,7 @@ import {
 } from "@/lib/calculator";
 import { mapGestureResult } from "@/lib/gesture-mapper";
 import type {
+  CameraOverlayBox,
   CreateHistoryPayload,
   HistoryEntry,
   RecognizedGesture,
@@ -28,6 +29,15 @@ const STABLE_FOR_MS = 850;
 const MIN_HITS = 6;
 const HISTORY_BOOT_RETRY_DELAY_MS = 1500;
 const HISTORY_BOOT_MAX_ATTEMPTS = 6;
+const DETECTION_CANVAS_SIZE = 768;
+const GUIDE_BOX_TARGET_WIDTH = 0.4;
+const GUIDE_BOX_MAX_HEIGHT = 0.78;
+const DEFAULT_GUIDE_BOX: CameraOverlayBox = {
+  left: 0.3,
+  top: 0.145,
+  width: 0.4,
+  height: 0.71,
+};
 
 type CandidateGesture = {
   gesture: RecognizedGesture;
@@ -36,12 +46,74 @@ type CandidateGesture = {
 };
 
 const DEFAULT_STATUS =
-  "Model akan memproses kamera secara real-time. Tahan gesture stabil sekitar 0.8 detik.";
+  "Model akan memproses kamera secara real-time. Posisikan tangan di area hijau lalu tahan gesture stabil sekitar 0.8 detik.";
+
+function clampToUnitRange(value: number) {
+  return Math.min(1, Math.max(0, value));
+}
+
+function buildGuideBox(
+  videoWidth: number,
+  videoHeight: number,
+): CameraOverlayBox {
+  if (videoWidth <= 0 || videoHeight <= 0) {
+    return DEFAULT_GUIDE_BOX;
+  }
+
+  const cropSize = Math.min(
+    videoWidth * GUIDE_BOX_TARGET_WIDTH,
+    videoHeight * GUIDE_BOX_MAX_HEIGHT,
+  );
+
+  return {
+    left: (videoWidth - cropSize) / 2 / videoWidth,
+    top: (videoHeight - cropSize) / 2 / videoHeight,
+    width: cropSize / videoWidth,
+    height: cropSize / videoHeight,
+  };
+}
+
+function buildHandDetectionBox(
+  landmarks: { x: number; y: number }[] | undefined,
+  guideBox: CameraOverlayBox,
+): CameraOverlayBox | null {
+  if (!landmarks || landmarks.length === 0) {
+    return null;
+  }
+
+  let minX = 1;
+  let minY = 1;
+  let maxX = 0;
+  let maxY = 0;
+
+  for (const landmark of landmarks) {
+    minX = Math.min(minX, landmark.x);
+    minY = Math.min(minY, landmark.y);
+    maxX = Math.max(maxX, landmark.x);
+    maxY = Math.max(maxY, landmark.y);
+  }
+
+  const paddingX = Math.max((maxX - minX) * 0.2, 0.03);
+  const paddingY = Math.max((maxY - minY) * 0.2, 0.03);
+  const left = clampToUnitRange(minX - paddingX);
+  const top = clampToUnitRange(minY - paddingY);
+  const right = clampToUnitRange(maxX + paddingX);
+  const bottom = clampToUnitRange(maxY + paddingY);
+
+  return {
+    left: guideBox.left + left * guideBox.width,
+    top: guideBox.top + top * guideBox.height,
+    width: Math.max((right - left) * guideBox.width, 0.01),
+    height: Math.max((bottom - top) * guideBox.height, 0.01),
+  };
+}
 
 export function useGestureCalculator() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const recognizerRef = useRef<GestureRecognizer | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const detectionCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const guideBoxRef = useRef<CameraOverlayBox>(DEFAULT_GUIDE_BOX);
   const animationFrameRef = useRef<number | null>(null);
   const lastVideoTimeRef = useRef(-1);
   const lastInferenceTimestampRef = useRef(0);
@@ -57,6 +129,10 @@ export function useGestureCalculator() {
   const [activeGesture, setActiveGesture] = useState<RecognizedGesture | null>(
     null,
   );
+  const [detectionGuideBox, setDetectionGuideBox] =
+    useState<CameraOverlayBox>(DEFAULT_GUIDE_BOX);
+  const [handDetectionBox, setHandDetectionBox] =
+    useState<CameraOverlayBox | null>(null);
   const [isRecognizerReady, setIsRecognizerReady] = useState(false);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isSavingHistory, setIsSavingHistory] = useState(false);
@@ -149,7 +225,14 @@ export function useGestureCalculator() {
   );
 
   const handleRecognition = useCallback(
-    (recognitionResult: GestureRecognizerResult) => {
+    (
+      recognitionResult: GestureRecognizerResult,
+      guideBox: CameraOverlayBox,
+    ) => {
+      setHandDetectionBox(
+        buildHandDetectionBox(recognitionResult.landmarks?.[0], guideBox),
+      );
+
       const mappedGesture = mapGestureResult(recognitionResult);
 
       if (!mappedGesture) {
@@ -221,12 +304,45 @@ export function useGestureCalculator() {
             performance.now(),
             lastInferenceTimestampRef.current + 1,
           );
-          const recognitionResult = recognizer.recognizeForVideo(
+          const guideBox = guideBoxRef.current;
+          const sourceWidth = videoElement.videoWidth;
+          const sourceHeight = videoElement.videoHeight;
+          const cropLeft = guideBox.left * sourceWidth;
+          const cropTop = guideBox.top * sourceHeight;
+          const cropWidth = guideBox.width * sourceWidth;
+          const cropHeight = guideBox.height * sourceHeight;
+          const detectionCanvas =
+            detectionCanvasRef.current ?? document.createElement("canvas");
+
+          detectionCanvasRef.current = detectionCanvas;
+          detectionCanvas.width = DETECTION_CANVAS_SIZE;
+          detectionCanvas.height = DETECTION_CANVAS_SIZE;
+
+          const context = detectionCanvas.getContext("2d");
+
+          if (!context) {
+            throw new Error("Canvas context tidak tersedia.");
+          }
+
+          context.clearRect(0, 0, detectionCanvas.width, detectionCanvas.height);
+          context.drawImage(
             videoElement,
+            cropLeft,
+            cropTop,
+            cropWidth,
+            cropHeight,
+            0,
+            0,
+            detectionCanvas.width,
+            detectionCanvas.height,
+          );
+
+          const recognitionResult = recognizer.recognizeForVideo(
+            detectionCanvas,
             timestampInMs,
           );
 
-          handleRecognition(recognitionResult);
+          handleRecognition(recognitionResult, guideBox);
           lastVideoTimeRef.current = videoElement.currentTime;
           lastInferenceTimestampRef.current = timestampInMs;
           recognitionErrorRef.current = null;
@@ -273,12 +389,16 @@ export function useGestureCalculator() {
     candidateGestureRef.current = null;
     acceptedTokenLockRef.current = null;
     recognitionErrorRef.current = null;
+    detectionCanvasRef.current = null;
+    guideBoxRef.current = DEFAULT_GUIDE_BOX;
     lastVideoTimeRef.current = -1;
     lastInferenceTimestampRef.current = 0;
     setActiveGesture(null);
+    setHandDetectionBox(null);
+    setDetectionGuideBox(DEFAULT_GUIDE_BOX);
     setIsCameraActive(false);
     setStatusMessage(
-      "Kamera berhenti. Aktifkan lagi untuk lanjut membaca gesture.",
+      "Kamera berhenti. Aktifkan lagi lalu arahkan tangan ke frame hijau untuk lanjut membaca gesture.",
     );
   }, []);
 
@@ -332,13 +452,22 @@ export function useGestureCalculator() {
         });
       });
 
+      const nextGuideBox = buildGuideBox(
+        videoElement.videoWidth,
+        videoElement.videoHeight,
+      );
+
+      guideBoxRef.current = nextGuideBox;
+      setDetectionGuideBox(nextGuideBox);
+      setHandDetectionBox(null);
+
       setIsCameraActive(true);
       setError(null);
       recognitionErrorRef.current = null;
       lastVideoTimeRef.current = -1;
       lastInferenceTimestampRef.current = 0;
       setStatusMessage(
-        "Kamera aktif. Tahan gesture stabil sampai token otomatis masuk ke expression builder.",
+        "Kamera aktif. Arahkan tangan ke frame hijau, lalu tahan gesture stabil sampai token otomatis masuk ke expression builder.",
       );
       animationFrameRef.current = window.requestAnimationFrame(processFrame);
     } catch (cameraError) {
@@ -411,7 +540,7 @@ export function useGestureCalculator() {
         recognizerRef.current = recognizer;
         setIsRecognizerReady(true);
         setStatusMessage(
-          "Gesture model siap. Aktifkan kamera lalu tahan gesture stabil untuk memasukkan token.",
+          "Gesture model siap. Aktifkan kamera lalu posisikan tangan di area hijau dan tahan gesture stabil untuk memasukkan token.",
         );
       } catch (loadError) {
         const message =
@@ -473,6 +602,8 @@ export function useGestureCalculator() {
     result,
     history,
     activeGesture,
+    detectionGuideBox,
+    handDetectionBox,
     isRecognizerReady,
     isCameraActive,
     isSavingHistory,
